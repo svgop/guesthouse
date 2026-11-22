@@ -204,6 +204,93 @@ fn the_server_ends_when_qemu_has_gone() {
     fs::remove_dir_all(&folder).unwrap();
 }
 
+/// The idle cap is a file in these tests, and what is in it is what the host has been asked: nothing
+/// until QEMU is seen, a four-byte request from then until QEMU has gone.
+fn cap_file(name: &str) -> PathBuf {
+    let path = run_folder(name).with_extension("cap");
+    fs::write(&path, []).unwrap();
+    path
+}
+
+fn asked(path: &Path) -> usize {
+    fs::metadata(path).map(|meta| meta.len() as usize).unwrap_or(0)
+}
+
+fn cap_on(server: &mut TestServer, node: &Path, micros: i32) {
+    server.hold_idle_cap(guesthouse_daemon::idle_cap::IdleCap::open(node).unwrap(), micros);
+}
+
+/// The invariant the cap's life rests on: a daemon that no QEMU ever reaches holds the host to
+/// nothing. Before, the request was written at startup, so a daemon left waiting, or one left
+/// behind by an app that crashed, kept the whole host near wake for as long as it lived.
+#[test]
+fn a_server_no_qemu_reaches_asks_for_nothing() {
+    let folder = run_folder("cap-unreached");
+    let node = cap_file("cap-unreached");
+    let mut server = server(&folder);
+    cap_on(&mut server, &node, 300);
+    server.set_qemu_gone_after(Duration::from_millis(50));
+    // No QEMU ever comes: the server steps its loop with nothing connected, for far longer than
+    // a cap would need to show itself.
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_millis(300) {
+        server.step(STEP).unwrap();
+    }
+    assert_eq!(asked(&node), 0, "a request was written before any QEMU connected");
+    fs::remove_dir_all(folder).unwrap();
+    fs::remove_file(node).unwrap();
+}
+
+/// The request is written the moment QEMU connects, not before and not after.
+#[test]
+fn the_cap_is_taken_when_qemu_first_connects() {
+    let folder = run_folder("cap-taken");
+    let node = cap_file("cap-taken");
+    let mut server = server(&folder);
+    cap_on(&mut server, &node, 300);
+    server.step(STEP).unwrap();
+    assert_eq!(asked(&node), 0, "nothing is held before QEMU is seen");
+    let vgpu = connect(&mut server, &folder, Channel::Vgpu);
+    assert_eq!(fs::read(&node).unwrap(), 300i32.to_le_bytes(), "QEMU is seen, so the host is asked");
+    drop(vgpu);
+    fs::remove_dir_all(folder).unwrap();
+    fs::remove_file(node).unwrap();
+}
+
+/// The cap is the server's alone, and goes with it: while the server lives one descriptor to
+/// the node is open in this process, and once the server has ended there is none. The count is
+/// read from the kernel's own table, `/proc/self/fd`, so the test states what the host would see.
+/// So a daemon that lingers after its machine is gone holds nothing, whatever it does next.
+#[test]
+fn the_cap_goes_when_the_server_ends() {
+    let folder = run_folder("cap-ended");
+    let node = cap_file("cap-ended");
+    let open_to = |node: &Path| {
+        fs::read_dir("/proc/self/fd")
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| fs::read_link(entry.path()).is_ok_and(|link| link == node))
+                    .count()
+            })
+            .unwrap_or(0)
+    };
+    let mut server = server(&folder);
+    cap_on(&mut server, &node, 300);
+    assert_eq!(open_to(&node), 1, "the server holds the node it was given");
+    server.set_qemu_gone_after(Duration::from_millis(50));
+    let vgpu = connect(&mut server, &folder, Channel::Vgpu);
+    assert_eq!(asked(&node), 4);
+    assert_eq!(open_to(&node), 1, "one QEMU in, still the one descriptor");
+    drop(vgpu);
+    server.run().unwrap();
+    assert_eq!(open_to(&node), 1, "the loop has ended and the server still exists, so still held");
+    drop(server);
+    assert_eq!(open_to(&node), 0, "the server is gone, and the node is held by no one");
+    fs::remove_dir_all(folder).unwrap();
+    fs::remove_file(node).unwrap();
+}
+
 #[test]
 fn a_channel_that_closes_and_comes_back_ends_nothing() {
     let folder = run_folder("back");

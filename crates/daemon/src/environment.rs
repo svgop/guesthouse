@@ -35,6 +35,17 @@ pub fn keep_cpu_views(value: Option<&str>) -> bool {
     value != Some("1")
 }
 
+/// The idle cap in microseconds, from `GUESTHOUSE_CPU_IDLE_US`. Unset means no cap and the
+/// host keeps its deep sleep states; a number asks the host to wake any core within that
+/// many microseconds for as long as a machine runs. Zero is a number too: it leaves the
+/// cores no sleep state at all. The node takes a signed 32-bit number and drops a negative
+/// one without a word, so a value of 2^31 or above is no number rather than a cap that
+/// quietly does nothing.
+pub fn idle_cap_us(value: Option<&str>) -> Option<i32> {
+    let micros: i32 = value?.parse().ok()?;
+    (micros >= -1).then_some(micros)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -69,5 +80,27 @@ mod tests {
         assert!(keep_cpu_views(Some("0")));
         assert!(keep_cpu_views(Some("yes")));
         assert!(!keep_cpu_views(Some("1")));
+    }
+
+    /// The node reads a signed 32-bit number and drops a negative one silently, apart from its own
+    /// -1 for no constraint, so a value the kernel would turn away is refused here, where it can
+    /// be said.
+    #[test]
+    fn a_cap_the_node_would_read_as_negative_is_no_cap() {
+        assert_eq!(idle_cap_us(Some("2147483648")), None);
+        assert_eq!(idle_cap_us(Some("4294967295")), None);
+        assert_eq!(idle_cap_us(Some("-2")), None);
+        assert_eq!(idle_cap_us(Some("")), None);
+        // The one negative the node takes is its own "no constraint", so a caller can let go.
+        assert_eq!(idle_cap_us(Some("-1")), Some(-1));
+    }
+
+    #[test]
+    fn an_idle_cap_is_a_number_or_nothing() {
+        assert_eq!(idle_cap_us(None), None);
+        assert_eq!(idle_cap_us(Some("300")), Some(300));
+        assert_eq!(idle_cap_us(Some("0")), Some(0));
+        assert_eq!(idle_cap_us(Some("deep")), None);
+        assert_eq!(idle_cap_us(Some("2147483647")), Some(i32::MAX));
     }
 }

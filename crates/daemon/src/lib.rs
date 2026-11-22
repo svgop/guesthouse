@@ -16,6 +16,7 @@ pub mod environment;
 pub mod gpu_note;
 pub mod guest_memory;
 pub mod handover;
+pub mod idle_cap;
 pub mod jail;
 pub mod logger;
 pub mod memory_files;

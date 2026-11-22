@@ -218,6 +218,9 @@ fn serve_on_render_node<B: guesthouse_backend::Backend>(
     let mut session = Session::new(backend, memory, config);
     session.timings_mut().set_enabled(env::var_os("GUESTHOUSE_TIMING").is_some());
     let mut server = Server::bind(&run_folder, Router::new(session))?;
+    if let Some((cap, micros)) = idle_cap() {
+        server.hold_idle_cap(cap, micros);
+    }
     lock_calls(locked)?;
     server.run()?;
     Ok(())
@@ -269,6 +272,9 @@ fn serve_nvidia(
         session.set_copy_order(guesthouse_core::CopyOrder::Held);
     }
     let mut server = Server::bind(&run_folder, Router::new(session))?;
+    if let Some((cap, micros)) = idle_cap() {
+        server.hold_idle_cap(cap, micros);
+    }
     lock_calls(locked)?;
     server.run()?;
     Ok(())
@@ -301,6 +307,31 @@ fn timeslice(name: &str, text: Option<&str>) -> Option<u64> {
         log::warn!("{name} is {text}, which isn't a number of microseconds");
     }
     micros
+}
+
+/// The idle cap, if `GUESTHOUSE_CPU_IDLE_US` asks for one, as the opened node and the microseconds
+/// to ask for. Nothing is asked for yet: the server asks when QEMU first connects and the request
+/// goes when QEMU has gone, so a daemon waiting for a machine, or one left behind by an app that
+/// crashed, holds the host to nothing. The open goes before the jail on purpose, so a refused node
+/// is a logged warning on the start path and never a jail to unwind. The NVIDIA start execs a
+/// helper between here and the jail, so the descriptor must be, and is, close-on-exec.
+#[cfg(any(feature = "stand-in", feature = "nvidia", feature = "amd", feature = "intel"))]
+fn idle_cap() -> Option<(guesthouse_daemon::idle_cap::IdleCap, i32)> {
+    use guesthouse_daemon::environment::idle_cap_us;
+    use guesthouse_daemon::idle_cap::{IdleCap, NODE};
+    let text = env::var("GUESTHOUSE_CPU_IDLE_US").ok();
+    let micros = idle_cap_us(text.as_deref());
+    if micros.is_none() && text.is_some() {
+        log::warn!("GUESTHOUSE_CPU_IDLE_US is {text:?}, which isn't a number of microseconds the host takes");
+    }
+    let micros = micros?;
+    match IdleCap::open(std::path::Path::new(NODE)) {
+        Ok(cap) => Some((cap, micros)),
+        Err(error) => {
+            log::warn!("GUESTHOUSE_CPU_IDLE_US is {micros}, but {NODE} refused it: {error}");
+            None
+        }
+    }
 }
 
 #[cfg(all(feature = "stand-in", not(any(feature = "nvidia", feature = "amd", feature = "intel"))))]
@@ -342,6 +373,9 @@ fn serve(slot: Slot, project: PathBuf) -> Result<(), Box<dyn std::error::Error>>
     let router = Router::new(Session::new(backend, memory, session_config(limits)));
     log::warn!("serving {} with a stand-in GPU: this will not run a guest", run_folder.display());
     let mut server = Server::bind(&run_folder, router)?;
+    if let Some((cap, micros)) = idle_cap() {
+        server.hold_idle_cap(cap, micros);
+    }
     lock_calls(locked)?;
     server.run()?;
     Ok(())

@@ -5,6 +5,7 @@
 
 use crate::display_note::{self, ScreenNote};
 use crate::gpu_note::write_note;
+use crate::idle_cap::{self, IdleCap};
 use crate::router::{Channel, FrameSink, Router};
 use crate::viewer::ViewerPort;
 use guesthouse_backend::{Backend, GuestMemory};
@@ -90,6 +91,13 @@ pub struct Server<B, M> {
     scratch: Vec<u8>,
     /// QEMU has connected at some point, so a closed channel means something.
     qemu_seen: bool,
+    /// The idle cap, opened before the jail and asked for when QEMU first connects, so the host is
+    /// held near wake for the machine's life and for no longer. `None` without a cap to take.
+    idle_cap: Option<IdleCap>,
+    /// What the idle cap asks for, in microseconds.
+    idle_cap_micros: i32,
+    /// Whether the idle cap has been asked for, so it is asked for once.
+    idle_cap_taken: bool,
     /// When the last channel closed, if they're all closed.
     all_closed_since: Option<Instant>,
     qemu_gone_after: Duration,
@@ -127,6 +135,9 @@ impl<B: Backend, M: GuestMemory> Server<B, M> {
             wake: None,
             scratch: Vec::new(),
             qemu_seen: false,
+            idle_cap: None,
+            idle_cap_micros: 0,
+            idle_cap_taken: false,
             all_closed_since: None,
             qemu_gone_after: QEMU_GONE_AFTER,
             run_folder: run_folder.to_owned(),
@@ -143,6 +154,13 @@ impl<B: Backend, M: GuestMemory> Server<B, M> {
     /// For a test, which has no reason to wait.
     pub fn set_qemu_gone_after(&mut self, time: Duration) {
         self.qemu_gone_after = time;
+    }
+
+    /// Gives the server a cap to take when QEMU first connects. A cap already open and not yet
+    /// asked for, so nothing is held while the daemon waits for a machine.
+    pub fn hold_idle_cap(&mut self, cap: IdleCap, micros: i32) {
+        self.idle_cap = Some(cap);
+        self.idle_cap_micros = micros;
     }
 
     pub fn router(&self) -> &Router<B, M> {
@@ -173,6 +191,22 @@ impl<B: Backend, M: GuestMemory> Server<B, M> {
                 log::info!("kept: {:?}", self.router.session().table_sizes());
                 log::info!("frames: {:?}", self.router.session().frame_counts());
                 last_report = now;
+            }
+        }
+    }
+
+    /// Asks the host to keep its cores near wake, the first time QEMU is seen. A refused request is
+    /// said and the machine runs uncapped: the cap is an optimisation, never a condition of a start.
+    fn take_idle_cap(&mut self) {
+        let (Some(cap), true) = (&mut self.idle_cap, !self.idle_cap_taken) else { return };
+        let micros = self.idle_cap_micros;
+        match cap.ask(micros) {
+            Ok(()) => {
+                log::info!("the host keeps its cores within {micros} µs of waking while this machine runs")
+            }
+            Err(error) => {
+                log::warn!("the idle cap of {micros} µs was refused by {}: {error}", idle_cap::NODE);
+                self.idle_cap = None;
             }
         }
     }
@@ -247,6 +281,7 @@ impl<B: Backend, M: GuestMemory> Server<B, M> {
                 let (stream, _) = self.ports[index].listener.accept()?;
                 log::info!("QEMU connected to {:?}", self.ports[index].channel);
                 self.qemu_seen = true;
+                self.take_idle_cap();
                 self.ports[index].connection = Some(Connection { stream, frames: FrameStream::new() });
             }
         }
