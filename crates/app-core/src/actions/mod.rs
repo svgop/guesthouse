@@ -171,7 +171,12 @@ pub fn plan_for(context: &Context, machine: &Machine, boot: Boot) -> VmPlan {
     let cap = video_cap(machine, &mates, max_vram_gib_for(context, machine));
     let mut plan = VmPlan::new(context, machine, boot, context.slot, cap);
     if machine.vcache_pin {
-        plan.pin = Some(cpu_list(&vcache_cpus(&context.cpus)));
+        let pin = cpu_list(&vcache_cpus(&context.cpus));
+        plan.pin = Some(pin.clone());
+        if crate::placement::on() {
+            let threads = usize::try_from(machine.cores).unwrap_or(0);
+            plan.placement = crate::placement::plan(context, &pin, threads);
+        }
     }
     plan
 }

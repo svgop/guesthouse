@@ -54,7 +54,7 @@ serde_json = "1"
 # Telling whether a guest already has this program's copy of a file, without sending it.
 sha2 = "0.11"
 # Safe calls for statvfs, flock, kill, access, getxattr and a send that never waits, which keeps `unsafe` out of this crate.
-rustix = { version = "1", features = ["fs", "net", "process"] }
+rustix = { version = "1", features = ["fs", "net", "process", "thread"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 # ptrace, for a test that QEMU's jail refuses it.

@@ -54,6 +54,7 @@ pub mod only_through;
 pub mod overlay;
 pub mod paths;
 pub mod payload_install;
+pub mod placement;
 pub mod process_stat;
 pub mod processes;
 pub mod random;

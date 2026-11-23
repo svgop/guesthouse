@@ -38,7 +38,7 @@ pub const FREE_AT_START_GIB: u64 = 1;
 const KIB: u64 = 1024;
 
 /// The numbers of `cpuN` folders.
-fn cpu_numbers(root: &Path) -> Vec<u32> {
+pub(crate) fn cpu_numbers(root: &Path) -> Vec<u32> {
     sorted_names(root).iter().filter_map(|name| name.strip_prefix("cpu")?.parse().ok()).collect()
 }
 

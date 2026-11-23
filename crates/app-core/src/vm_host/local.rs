@@ -313,6 +313,36 @@ impl LocalHost<'_> {
         }
         answered
     }
+
+    /// Points the machine's threads at their plan: one CPU per vCPU, and the rest of QEMU's
+    /// threads off the cores the guest's threads hold. The machine runs on the flat mask it was
+    /// launched with whatever this finds, so what can't be set is said and the start carries on.
+    fn place(&self, plan: &VmPlan) {
+        for pid in self.daemons() {
+            crate::placement::apply_daemon(pid);
+        }
+        let Some(wanted) = &plan.placement else { return };
+        let Some(pid) = qemu_pid(self.context, None) else {
+            let _ =
+                write_log(self.context, "start: the threads were left as they were launched: no VM to walk");
+            return;
+        };
+        let found = crate::placement::apply(self.context, wanted, pid);
+        let _ = write_log(
+            self.context,
+            &format!(
+                "start: threads on the pinned CPUs: {} of {} vCPU threads and {} more, the guest's CPUs on {}, the rest on {}",
+                found.vcpus,
+                wanted.vcpu.len(),
+                found.aux,
+                wanted.vcpu.join(","),
+                wanted.aux
+            ),
+        );
+        for note in found.failed {
+            let _ = write_log(self.context, &format!("start: {note}"));
+        }
+    }
 }
 
 impl VmHost for LocalHost<'_> {
@@ -320,13 +350,17 @@ impl VmHost for LocalHost<'_> {
         self.context.make_run_folder(Some(plan.slot))?;
         // Before anything is started, so a drive that can't be had leaves nothing running.
         let drives = OpenDrives::open(self.context, &plan.drives)?;
-        if !plan.is_gpu() {
-            return self.start_plain(plan, machine, &drives);
+        let started = if !plan.is_gpu() {
+            self.start_plain(plan, machine, &drives)
+        } else if self.context.second_instance() {
+            Err(Failure::new(SECOND_INSTANCE_REFUSAL))
+        } else {
+            self.start_gpu(plan, machine, &drives)
+        };
+        if started.is_ok() {
+            self.place(plan);
         }
-        if self.context.second_instance() {
-            return Err(Failure::new(SECOND_INSTANCE_REFUSAL));
-        }
-        self.start_gpu(plan, machine, &drives)
+        started
     }
 
     /// With no daemon there's no agent to rely on, so the power button goes first.
